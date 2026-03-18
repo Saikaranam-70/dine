@@ -202,7 +202,7 @@ exports.createTable = asyncHandler(async (req, res) => {
   if (existing) return ApiResponse.error(res, 'Table number already exists', 400);
 
   const qrToken = uuidv4();
-  const qrBaseUrl = process.env.QR_BASE_URL || 'https://dine-1l6m.onrender.com';
+  const qrBaseUrl = process.env.QR_BASE_URL || 'https://dineqr-ten.vercel.app';
   const qrUrl = `${qrBaseUrl}/scan/${qrToken}`;
   console.log("QR_BASE_URL:", process.env.QR_BASE_URL);
   const qrImage = await QRCode.toDataURL(qrUrl, {
@@ -234,7 +234,7 @@ exports.regenerateQR = asyncHandler(async (req, res) => {
   if (!table) return ApiResponse.notFound(res, 'Table not found');
 
   const qrToken = uuidv4();
-  const qrBaseUrl = process.env.QR_BASE_URL || 'https://dine-1l6m.onrender.com';
+  const qrBaseUrl = process.env.QR_BASE_URL || 'https://dineqr-ten.vercel.app';
   const qrUrl = `${qrBaseUrl}/scan/${qrToken}`;
   const qrImage = await QRCode.toDataURL(qrUrl, { width: 400, margin: 2 });
 

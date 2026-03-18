@@ -1,0 +1,235 @@
+version: '3.9'
+
+services:
+  # ============================================================
+  # NODE.JS APP INSTANCES (4 replicas for load balancing)
+  # ============================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    image: restaurant-saas:latest
+    deploy:
+      replicas: 4
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      MONGO_URI_PROD: mongodb://mongo1:27017,mongo2:27017,mongo3:27017/restaurant_saas?replicaSet=rs0
+      REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      QR_BASE_URL: ${QR_BASE_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ============================================================
+  # NGINX LOAD BALANCER
+  # ============================================================
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.docker.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_cache:/var/cache/nginx
+    depends_on:
+      - app
+    networks:
+      - backend
+      - frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================
+  # MONGODB REPLICA SET (3 nodes for HA)
+  # ============================================================
+  mongo1:
+    image: mongo:7.0
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    volumes:
+      - mongo1_data:/data/db
+      - mongo1_config:/data/configdb
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+      MONGO_INITDB_DATABASE: restaurant_saas
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  mongo2:
+    image: mongo:7.0
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    volumes:
+      - mongo2_data:/data/db
+    networks:
+      - backend
+    restart: unless-stopped
+    depends_on: [mongo1]
+
+  mongo3:
+    image: mongo:7.0
+    command: mongod --replSet rs0 --bind_ip_all --port 27017
+    volumes:
+      - mongo3_data:/data/db
+    networks:
+      - backend
+    restart: unless-stopped
+    depends_on: [mongo1]
+
+  # MongoDB Replica Set Init
+  mongo-init:
+    image: mongo:7.0
+    depends_on: [mongo1, mongo2, mongo3]
+    networks: [backend]
+    restart: "no"
+    command: >
+      mongosh --host mongo1:27017 --eval
+      'rs.initiate({
+        _id: "rs0",
+        members: [
+          { _id: 0, host: "mongo1:27017", priority: 3 },
+          { _id: 1, host: "mongo2:27017", priority: 2 },
+          { _id: 2, host: "mongo3:27017", priority: 1 }
+        ]
+      })'
+
+  # ============================================================
+  # REDIS (with persistence)
+  # ============================================================
+  redis:
+    image: redis:7.2-alpine
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --no-appendfsync-on-rewrite yes
+      --auto-aof-rewrite-percentage 100
+      --auto-aof-rewrite-min-size 64mb
+      --loglevel notice
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # REDIS SENTINEL (HA for Redis)
+  # ============================================================
+  redis-sentinel:
+    image: redis:7.2-alpine
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./nginx/redis-sentinel.conf:/etc/redis/sentinel.conf:ro
+    networks: [backend]
+    depends_on: [redis]
+    restart: unless-stopped
+
+  # ============================================================
+  # MONGO EXPRESS (Admin UI — dev only)
+  # ============================================================
+  mongo-express:
+    image: mongo-express:latest
+    ports:
+      - "8081:8081"
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: ${MONGO_PASSWORD}
+      ME_CONFIG_MONGODB_URL: mongodb://admin:${MONGO_PASSWORD}@mongo1:27017/
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_EXPRESS_PASSWORD}
+    depends_on: [mongo1]
+    networks: [backend]
+    profiles: ["dev"]
+
+  # ============================================================
+  # REDIS COMMANDER (Admin UI — dev only)
+  # ============================================================
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      REDIS_HOSTS: "local:redis:6379:0:${REDIS_PASSWORD}"
+    ports:
+      - "8082:8081"
+    depends_on: [redis]
+    networks: [backend]
+    profiles: ["dev"]
+
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  frontend:
+    driver: bridge
+
+volumes:
+  mongo1_data:
+  mongo1_config:
+  mongo2_data:
+  mongo3_data:
+  redis_data:
+  nginx_cache:
